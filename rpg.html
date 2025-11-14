@@ -1,0 +1,560 @@
+<!doctype html>
+<html lang="id">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>RPG Dungeon — Final Stable</title>
+<style>
+  :root{--ui-bg:rgba(0,0,0,0.55);--accent:#b464ff}
+  html,body{height:100%;margin:0;background:#000;font-family:system-ui,-apple-system,Segoe UI,Roboto,"Helvetica Neue",Arial;color:#fff;overflow:hidden}
+  canvas{display:block;width:100vw;height:100vh}
+  /* UI */
+  #ui{position:fixed;left:12px;top:12px;background:var(--ui-bg);padding:10px;border-radius:10px;z-index:40;font-size:14px}
+  #volumeBox{position:fixed;right:12px;top:12px;background:var(--ui-bg);padding:8px;border-radius:10px;z-index:40;display:flex;gap:8px;align-items:center}
+  #controls{position:fixed;right:12px;bottom:12px;z-index:40;display:flex;flex-direction:column;gap:8px}
+  .ctrl-btn{background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.06);color:#fff;padding:8px 12px;border-radius:8px;cursor:pointer}
+  .ctrl-btn:hover{background:rgba(255,255,255,0.08)}
+  #settingsToggle{position:fixed;left:50%;transform:translateX(-50%);top:12px;z-index:40;background:rgba(0,0,0,0.5);padding:6px 8px;border-radius:8px;cursor:pointer}
+  #settingsModal{position:fixed;inset:0;display:none;place-items:center;background:rgba(0,0,0,0.45);z-index:60}
+  #settingsPanel{background:#071022;padding:16px;border-radius:10px;min-width:320px}
+  label{display:block;font-size:13px;margin-top:8px;color:#cbd5e1}
+  input[type=color]{width:100%;height:36px;border-radius:6px;border:0;padding:0}
+  .row{display:flex;gap:8px;align-items:center}
+  #toast{position:fixed;left:50%;transform:translateX(-50%);bottom:80px;background:rgba(0,0,0,0.7);padding:8px 12px;border-radius:8px;display:none;z-index:80}
+  progress#xpbar{height:12px;border-radius:8px;background:#2b2b2b}
+  .small{font-size:12px;color:#cbd5e1}
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+
+<div id="ui">
+  ❤️ HP: <span id="hp">0</span> &nbsp;|&nbsp; ⚔️ LVL: <span id="lvl">0</span> &nbsp;|&nbsp; ⭐ XP: <span id="xp">0</span>/<span id="xpNeed">0</span>
+  <div style="margin-top:6px"><progress id="xpbar" max="100" value="0" style="width:240px;"></progress></div>
+</div>
+
+<div id="volumeBox">
+  <div class="small">🎵</div>
+  <input id="musicVol" type="range" min="0" max="1" step="0.01" value="0.5" title="Music volume">
+  <div style="width:8px"></div>
+  <div class="small">🔊</div>
+  <input id="sfxVol" type="range" min="0" max="1" step="0.01" value="0.6" title="SFX volume">
+</div>
+
+<div id="settingsToggle" class="ctrl-btn">⚙️ Settings</div>
+
+<div id="controls">
+  <button id="saveBtn" class="ctrl-btn">💾 Save</button>
+  <button id="loadBtn" class="ctrl-btn">📂 Load</button>
+  <button id="restartBtn" class="ctrl-btn">🔄 Restart</button>
+</div>
+
+<!-- Settings modal -->
+<div id="settingsModal">
+  <div id="settingsPanel">
+    <h3 style="margin:0 0 8px 0">Settings</h3>
+    <label>Trail / Aura color</label>
+    <input id="trailColorPicker" type="color" value="#b464ff">
+    <label>Glow intensity (1 = subtle, 3 = bright)</label>
+    <input id="glowIntensity" type="range" min="1" max="3" step="0.1" value="1.8">
+    <label>Trail length (points)</label>
+    <input id="trailLen" type="range" min="8" max="60" value="30">
+    <label class="row">Persist settings <input id="persistSettings" type="checkbox" style="margin-left:auto"></label>
+    <div style="display:flex;justify-content:flex-end;margin-top:12px;gap:8px">
+      <button id="closeSettings" class="ctrl-btn">Tutup</button>
+    </div>
+  </div>
+</div>
+
+<div id="toast">Saved</div>
+
+<script>
+/* ===========================
+   Final stable RPG game code
+   Put the listed asset files in the same folder:
+   background game.png, raven.png, orc.png, heal.png,
+   bgm.mp3, slash.mp3, heal.mp3, levelup.mp3
+   =========================== */
+
+/* ---------- Canvas setup ---------- */
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+
+function resize() {
+  canvas.width = window.innerWidth;
+  canvas.height = window.innerHeight;
+}
+window.addEventListener('resize', resize);
+resize();
+
+/* ---------- Assets filenames ---------- */
+const ASSETS = {
+  bg: 'background game.png',
+  player: 'raven.png',
+  enemy: 'orc.png',
+  heal: 'heal.png',
+  bgm: 'bgm.mp3',
+  slash: 'slash.mp3',
+  healSfx: 'heal.mp3',
+  levelup: 'levelup.mp3'
+};
+
+/* ---------- Load helpers (graceful) ---------- */
+function loadImage(src){
+  return new Promise((res, rej)=>{
+    const img = new Image();
+    img.onload = ()=>res(img);
+    img.onerror = ()=>rej(new Error('img fail: '+src));
+    img.src = src;
+  });
+}
+function loadAudio(src){
+  return new Promise((res, rej)=>{
+    const a = new Audio();
+    a.preload = 'auto';
+    a.addEventListener('canplaythrough', ()=>res(a), {once:true});
+    a.addEventListener('error', ()=>rej(new Error('audio fail: '+src)), {once:true});
+    a.src = src;
+    // fallback resolve if can't fire canplaythrough quickly
+    setTimeout(()=>{ if (a.readyState >= 2) res(a); }, 1500);
+  });
+}
+
+/* ---------- Game state ---------- */
+let images = {};
+let audio = {};
+let player = { x: canvas.width/2, y: canvas.height/2, size: 56, hp: 40, maxHp: 40, atk: 4, lvl: 1, xp: 0, xpNeed: 60 };
+let enemies = [];
+let heals = [];
+let particles = [];
+let trail = [];            // positions for neon motion tail buffer
+let TRAIL_MAX = 30;       // will be linked to settings
+let auraTick = 0;         // single declaration only
+
+/* ---------- UI references ---------- */
+const hpEl = document.getElementById('hp');
+const lvlEl = document.getElementById('lvl');
+const xpEl = document.getElementById('xp');
+const xpNeedEl = document.getElementById('xpNeed');
+const xpbar = document.getElementById('xpbar');
+const musicVol = document.getElementById('musicVol');
+const sfxVol = document.getElementById('sfxVol');
+const trailPicker = document.getElementById('trailColorPicker');
+const glowIntensityInput = document.getElementById('glowIntensity');
+const trailLenInput = document.getElementById('trailLen');
+const persistCheckbox = document.getElementById('persistSettings');
+const settingsModal = document.getElementById('settingsModal');
+const settingsToggle = document.getElementById('settingsToggle');
+const closeSettings = document.getElementById('closeSettings');
+const toast = document.getElementById('toast');
+
+/* ---------- Default settings (persist able) ---------- */
+let settings = {
+  color: localStorage.getItem('rpg_trail_color') || '#b464ff',
+  glowIntensity: Number(localStorage.getItem('rpg_glow_intensity') || 1.8),
+  trailLen: Number(localStorage.getItem('rpg_trail_len') || TRAIL_MAX),
+  persist: localStorage.getItem('rpg_trail_persist') === '1'
+};
+trailPicker.value = settings.color;
+glowIntensityInput.value = settings.glowIntensity;
+trailLenInput.value = settings.trailLen;
+persistCheckbox.checked = settings.persist;
+TRAIL_MAX = settings.trailLen;
+
+/* ---------- Preload assets (attempt, but tolerant) ---------- */
+async function preloadAll(){
+  // images
+  try { images.bg = await loadImage(ASSETS.bg); } catch(e){ images.bg = null; console.warn(e.message); }
+  try { images.player = await loadImage(ASSETS.player); } catch(e){ images.player = null; console.warn(e.message); }
+  try { images.enemy = await loadImage(ASSETS.enemy); } catch(e){ images.enemy = null; console.warn(e.message); }
+  try { images.heal = await loadImage(ASSETS.heal); } catch(e){ images.heal = null; console.warn(e.message); }
+
+  // audio
+  try { audio.bgm = await loadAudio(ASSETS.bgm); audio.bgm.loop = true; } catch(e){ audio.bgm = null; console.warn(e.message); }
+  try { audio.slash = await loadAudio(ASSETS.slash); } catch(e){ audio.slash = null; console.warn(e.message); }
+  try { audio.heal = await loadAudio(ASSETS.healSfx); } catch(e){ audio.heal = null; console.warn(e.message); }
+  try { audio.levelup = await loadAudio(ASSETS.levelup); } catch(e){ audio.levelup = null; console.warn(e.message); }
+
+  // set volumes from last saved
+  musicVol.value = Number(localStorage.getItem('rpg_music_vol') || musicVol.value);
+  sfxVol.value = Number(localStorage.getItem('rpg_sfx_vol') || sfxVol.value);
+  if (audio.bgm) audio.bgm.volume = Number(musicVol.value);
+  Object.keys(audio).forEach(k => { if (k!=='bgm' && audio[k]) audio[k].volume = Number(sfxVol.value); });
+
+  initGame();
+}
+
+/* ---------- Controls ---------- */
+const keys = {};
+window.addEventListener('keydown', e => keys[e.key] = true);
+window.addEventListener('keyup', e => keys[e.key] = false);
+
+/* ---------- Spawn helpers ---------- */
+function spawnEnemy() {
+  enemies.push({
+    x: Math.random()*(canvas.width-160)+80,
+    y: Math.random()*(canvas.height-160)+80,
+    hp: 8 + player.lvl*2,
+    size: Math.min(96, 48 + player.lvl*2)
+  });
+}
+function spawnHeal() {
+  heals.push({ x: Math.random()*(canvas.width-120)+60, y: Math.random()*(canvas.height-120)+60, size: 44 });
+}
+for (let i=0;i<5;i++) spawnEnemy();
+(function scheduleHealSpawn(){ setTimeout(()=>{ spawnHeal(); scheduleHealSpawn(); }, 8000 + Math.random()*12000); })();
+
+/* ---------- Particles & VFX ---------- */
+function addParticles(x,y,color,amount=36){
+  for (let i=0;i<amount;i++){
+    particles.push({
+      x,y,
+      dx:(Math.random()-0.5)*(2+Math.random()*6),
+      dy:(Math.random()-0.5)*(2+Math.random()*6),
+      life:30 + Math.random()*50,
+      color,
+      size: Math.random()*3 + 1,
+      blink: Math.random()*0.6 + 0.4
+    });
+  }
+}
+function levelUpEffect(x,y){
+  if (audio.levelup && typeof audio.levelup.play === 'function'){ audio.levelup.currentTime = 0; audio.levelup.play().catch(()=>{}); }
+  addParticles(x,y,'rgba(255,215,0,0.95)',100);
+}
+
+/* ---------- Save / Load / Restart ---------- */
+function savePlayer(){ localStorage.setItem('rpgSave_v1', JSON.stringify(player)); showToast('Saved'); }
+function loadPlayer(){ const d = localStorage.getItem('rpgSave_v1'); if (d){ try{ player = JSON.parse(d); showToast('Loaded'); }catch(e){ showToast('Load error'); } } else showToast('No save'); }
+function restartGame(){
+  fadeOut(audio.bgm, 400);
+  setTimeout(()=>{
+    localStorage.removeItem('rpgSave_v1');
+    player = { x: canvas.width/2, y: canvas.height/2, size:56, hp:40, maxHp:40, atk:4, lvl:1, xp:0, xpNeed:60 };
+    enemies = []; heals = []; particles = []; trail = [];
+    for (let i=0;i<5;i++) spawnEnemy();
+    showToast('Restarted');
+    tryPlayBGM();
+  }, 450);
+}
+document.getElementById('saveBtn').onclick = savePlayer;
+document.getElementById('loadBtn').onclick = loadPlayer;
+document.getElementById('restartBtn').onclick = restartGame;
+
+/* ---------- UI events for settings ---------- */
+settingsToggle.onclick = ()=> settingsModal.style.display = 'grid';
+closeSettings.onclick = ()=>{
+  settingsModal.style.display = 'none';
+  settings.color = trailPicker.value;
+  settings.glowIntensity = Number(glowIntensityInput.value);
+  settings.trailLen = Number(trailLenInput.value);
+  settings.persist = persistCheckbox.checked;
+  TRAIL_MAX = settings.trailLen;
+  if (settings.persist){
+    localStorage.setItem('rpg_trail_color', settings.color);
+    localStorage.setItem('rpg_glow_intensity', settings.glowIntensity);
+    localStorage.setItem('rpg_trail_len', settings.trailLen);
+    localStorage.setItem('rpg_trail_persist', '1');
+  } else {
+    localStorage.removeItem('rpg_trail_persist');
+  }
+  showToast('Settings applied');
+};
+trailPicker.addEventListener('input', ()=> { settings.color = trailPicker.value; if (settings.persist) localStorage.setItem('rpg_trail_color', settings.color); });
+glowIntensityInput.addEventListener('input', ()=> { settings.glowIntensity = Number(glowIntensityInput.value); if (settings.persist) localStorage.setItem('rpg_glow_intensity', settings.glowIntensity); });
+trailLenInput.addEventListener('input', ()=> { settings.trailLen = Number(trailLenInput.value); TRAIL_MAX = settings.trailLen; if (settings.persist) localStorage.setItem('rpg_trail_len', settings.trailLen); });
+persistCheckbox.addEventListener('change', ()=> { settings.persist = persistCheckbox.checked; if (settings.persist) localStorage.setItem('rpg_trail_persist','1'); else localStorage.removeItem('rpg_trail_persist'); });
+
+/* volume sliders */
+musicVol.addEventListener('input', ()=> { if (audio.bgm) audio.bgm.volume = Number(musicVol.value); localStorage.setItem('rpg_music_vol', musicVol.value); });
+sfxVol.addEventListener('input', ()=> { Object.keys(audio).forEach(k=>{ if (k!=='bgm' && audio[k]) audio[k].volume = Number(sfxVol.value); }); localStorage.setItem('rpg_sfx_vol', sfxVol.value); });
+
+/* ---------- Audio helpers ---------- */
+function tryPlayBGM(){ if (audio.bgm && typeof audio.bgm.play === 'function'){ audio.bgm.play().catch(()=>{}); } }
+function fadeOut(a, time=600){ if (!a || typeof a.volume === 'undefined') return; const step = 50; const dec = a.volume / (time/step); const iv = setInterval(()=>{ a.volume = Math.max(0, a.volume - dec); if (a.volume <= 0.001){ a.volume = 0; a.pause(); clearInterval(iv);} }, step); }
+
+/* ---------- Game init after preload ---------- */
+function initGame(){
+  // restore persisted settings if any
+  if (localStorage.getItem('rpg_trail_persist') === '1') {
+    settings.color = localStorage.getItem('rpg_trail_color') || settings.color;
+    settings.glowIntensity = Number(localStorage.getItem('rpg_glow_intensity') || settings.glowIntensity);
+    settings.trailLen = Number(localStorage.getItem('rpg_trail_len') || settings.trailLen);
+    trailPicker.value = settings.color;
+    glowIntensityInput.value = settings.glowIntensity;
+    trailLenInput.value = settings.trailLen;
+    persistCheckbox.checked = true;
+    TRAIL_MAX = settings.trailLen;
+  }
+
+  // restore saved player if exists
+  const saved = localStorage.getItem('rpgSave_v1');
+  if (saved){ try{ player = JSON.parse(saved); } catch(e){} }
+
+  // set audio volumes
+  if (audio.bgm) audio.bgm.volume = Number(localStorage.getItem('rpg_music_vol') || musicVol.value);
+  Object.keys(audio).forEach(k=>{ if (k!=='bgm' && audio[k]) audio[k].volume = Number(localStorage.getItem('rpg_sfx_vol') || sfxVol.value); });
+
+  // ensure BGM plays once user interacts (gesture)
+  document.body.addEventListener('pointerdown', tryPlayBGM, {once:true});
+
+  requestAnimationFrame(loop);
+}
+
+/* ---------- Core update & draw ---------- */
+let lastTime = 0;
+function update(dt){
+  auraTick += 0.06;
+  const speed = 3 + Math.floor(player.lvl/6);
+  if (keys['w']||keys['ArrowUp']) player.y -= speed;
+  if (keys['s']||keys['ArrowDown']) player.y += speed;
+  if (keys['a']||keys['ArrowLeft']) player.x -= speed;
+  if (keys['d']||keys['ArrowRight']) player.x += speed;
+
+  player.x = Math.max(player.size/2, Math.min(canvas.width-player.size/2, player.x));
+  player.y = Math.max(player.size/2, Math.min(canvas.height-player.size/2, player.y));
+
+  // update trail buffer (push if moved sufficiently)
+  const last = trail[trail.length-1];
+  const minDist = Math.max(3, player.size*0.04);
+  if (!last || Math.hypot(player.x-last.x, player.y-last.y) > minDist) {
+    trail.push({ x: player.x, y: player.y, age: 0});
+    if (trail.length > TRAIL_MAX) trail.shift();
+  } else if (last) {
+    last.x += (player.x - last.x) * 0.35;
+    last.y += (player.y - last.y) * 0.35;
+  }
+  for (let i=0;i<trail.length;i++) trail[i].age++;
+
+  // enemies interactions
+  for (let i=enemies.length-1;i>=0;i--){
+    const e = enemies[i];
+    const dx = e.x - player.x, dy = e.y - player.y;
+    const d = Math.hypot(dx,dy);
+    if (d < (player.size/2 + e.size/2)){
+      e.hp -= player.atk;
+      player.hp -= 0.18 + Math.max(0, player.lvl*0.02);
+      if (e.hp <= 0){
+        enemies.splice(i,1);
+        player.xp += 12 + player.lvl*3;
+        if (audio.slash && typeof audio.slash.play === 'function'){ audio.slash.currentTime = 0; audio.slash.play().catch(()=>{}); }
+        addParticles(e.x, e.y, 'rgba(170,0,255,0.9)', 48);
+        spawnEnemy();
+        if (player.xp >= player.xpNeed){
+          player.xp -= player.xpNeed;
+          player.lvl++;
+          player.xpNeed = Math.floor(player.xpNeed * 1.4);
+          player.maxHp += 6; player.hp = player.maxHp; player.atk += 1;
+          levelUpEffect(player.x, player.y);
+        }
+      }
+    }
+  }
+
+  // pickups
+  for (let i=heals.length-1;i>=0;i--){
+    const h = heals[i];
+    const dx = h.x - player.x, dy = h.y - player.y;
+    const d = Math.hypot(dx,dy);
+    if (d < (player.size/2 + h.size/2)){
+      player.hp = Math.min(player.maxHp, player.hp + (8 + player.lvl*2));
+      if (audio.heal && typeof audio.heal.play === 'function'){ audio.heal.currentTime = 0; audio.heal.play().catch(()=>{}); }
+      addParticles(h.x, h.y, 'rgba(34,197,94,0.95)', 40);
+      heals.splice(i,1);
+    }
+  }
+
+  if (Math.random() < 0.0009) spawnHeal();
+
+  // particles update
+  for (let i=particles.length-1;i>=0;i--){
+    const p = particles[i];
+    p.x += p.dx; p.y += p.dy; p.life--;
+    p.size += 0.02;
+    if (p.life <= 0) particles.splice(i,1);
+  }
+
+  // update UI & autosave
+  hpEl.textContent = Math.floor(player.hp);
+  lvlEl.textContent = player.lvl;
+  xpEl.textContent = Math.floor(player.xp);
+  xpNeedEl.textContent = player.xpNeed;
+  xpbar.max = player.xpNeed; xpbar.value = player.xp;
+  localStorage.setItem('rpgSave_v1', JSON.stringify(player));
+}
+
+/* ---------- Drawing: neon tail + aura + world ---------- */
+function drawNeonTail(){
+  if (!trail.length) return;
+  ctx.globalCompositeOperation = 'lighter';
+  for (let i=0;i<trail.length;i++){
+    const t = trail[i];
+    const norm = i / (trail.length - 1 || 1);
+    const base = player.size * 0.45;
+    const radius = base * (0.6 + norm * 1.2);
+    const alpha = Math.pow(norm, 0.9) * 0.9 * (settings.glowIntensity || 1.8);
+    const c = settings.color || '#b464ff';
+    const grad = ctx.createRadialGradient(t.x, t.y, 0, t.x, t.y, radius);
+    grad.addColorStop(0, hexToRgba(c, alpha));
+    grad.addColorStop(0.6, hexToRgba(c, alpha * 0.35));
+    grad.addColorStop(1, 'rgba(0,0,0,0)');
+    ctx.fillStyle = grad;
+    ctx.beginPath();
+    ctx.arc(t.x, t.y, radius, 0, Math.PI*2);
+    ctx.fill();
+  }
+  ctx.globalCompositeOperation = 'source-over';
+}
+
+function drawAura(){
+  auraTick += 0.06;
+  const pulse = 1 + Math.sin(auraTick) * 0.25;
+  const intensity = (settings.glowIntensity || 1.8);
+  const baseRadius = player.size * 0.55;
+  const radius = baseRadius * (1 + 0.6 * intensity) * pulse;
+  const col = settings.color || '#b464ff';
+  const grad = ctx.createRadialGradient(player.x, player.y, 0, player.x, player.y, radius);
+  grad.addColorStop(0, hexToRgba(col, 0.45 * intensity));
+  grad.addColorStop(0.4, hexToRgba(col, 0.22 * intensity));
+  grad.addColorStop(1, 'rgba(0,0,0,0)');
+  ctx.globalCompositeOperation = 'lighter';
+  ctx.fillStyle = grad;
+  ctx.beginPath();
+  ctx.arc(player.x, player.y, radius, 0, Math.PI*2);
+  ctx.fill();
+  ctx.globalCompositeOperation = 'source-over';
+}
+
+function draw(){
+  // background cover
+  if (images.bg && images.bg.naturalWidth) {
+    const cw = canvas.width, ch = canvas.height;
+    const iw = images.bg.width, ih = images.bg.height;
+    const ir = iw / ih, cr = cw / ch;
+    let drawW, drawH, drawX, drawY;
+    if (ir > cr) { drawH = ch; drawW = ch * ir; drawY = 0; drawX = (cw - drawW)/2; }
+    else { drawW = cw; drawH = cw / ir; drawX = 0; drawY = (ch - drawH)/2; }
+    ctx.drawImage(images.bg, drawX, drawY, drawW, drawH);
+  } else {
+    ctx.fillStyle = '#071022'; ctx.fillRect(0,0,canvas.width,canvas.height);
+  }
+
+  // draws base world objects
+  for (const h of heals) {
+    if (images.heal && images.heal.naturalWidth) ctx.drawImage(images.heal, h.x - h.size/2, h.y - h.size/2, h.size, h.size);
+    else { ctx.fillStyle = '#22c55e'; ctx.beginPath(); ctx.arc(h.x,h.y,h.size/2,0,Math.PI*2); ctx.fill(); }
+  }
+  for (const e of enemies) {
+    if (images.enemy && images.enemy.naturalWidth) ctx.drawImage(images.enemy, e.x - e.size/2, e.y - e.size/2, e.size, e.size);
+    else { ctx.fillStyle = '#ef4444'; ctx.fillRect(e.x - e.size/2, e.y - e.size/2, e.size, e.size); }
+  }
+
+  // neon tail & aura under player
+  drawNeonTail();
+  drawAura();
+
+  // player sprite on top
+  if (images.player && images.player.naturalWidth) ctx.drawImage(images.player, player.x - player.size/2, player.y - player.size/2, player.size, player.size);
+  else { ctx.fillStyle = '#60a5fa'; ctx.fillRect(player.x - player.size/2, player.y - player.size/2, player.size, player.size); }
+
+  // particles (blink)
+  for (const p of particles) {
+    const a = Math.max(0, Math.min(1, p.life/80));
+    const blink = 0.5 + 0.5 * Math.sin((p.life % 10) * p.blink);
+    ctx.globalAlpha = a * blink;
+    ctx.fillStyle = p.color;
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, p.size, 0, Math.PI*2);
+    ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+}
+
+/* ---------- Main loop ---------- */
+let running = true;
+function loop(ts){
+  if (!running) return;
+  update(ts);
+  draw();
+  requestAnimationFrame(loop);
+}
+
+/* ---------- Utility helpers ---------- */
+function hexToRgba(hex, alpha=1){
+  if (!hex) hex = '#b464ff';
+  const h = hex.replace('#','');
+  const bigint = parseInt(h, 16);
+  const r = (bigint >> 16) & 255;
+  const g = (bigint >> 8) & 255;
+  const b = bigint & 255;
+  return `rgba(${r},${g},${b},${alpha})`;
+}
+function showToast(txt, ms=900){ toast.textContent = txt; toast.style.display='block'; clearTimeout(toast._t); toast._t = setTimeout(()=> toast.style.display='none', ms); }
+
+/* ---------- Start preload then init ---------- */
+window.addEventListener('load', ()=>{ preloadAll().catch(e=>{ console.error(e); preloadAll(); }); });
+
+function initGame(){ preloadAll().catch(()=>{}); } // noop wrapper for clarity
+
+/* ---------- Preload wrapper used earlier (call once) ---------- */
+async function preloadAll(){
+  // Prevent double-init: if images already set, still ok
+  await (async ()=>{
+    try { images.bg = await loadImage(ASSETS.bg); } catch(e){ images.bg = null; }
+    try { images.player = await loadImage(ASSETS.player); } catch(e){ images.player = null; }
+    try { images.enemy = await loadImage(ASSETS.enemy); } catch(e){ images.enemy = null; }
+    try { images.heal = await loadImage(ASSETS.heal); } catch(e){ images.heal = null; }
+    try { audio.bgm = await loadAudio(ASSETS.bgm); audio.bgm.loop = true; } catch(e){ audio.bgm = null; }
+    try { audio.slash = await loadAudio(ASSETS.slash); } catch(e){ audio.slash = null; }
+    try { audio.heal = await loadAudio(ASSETS.healSfx); } catch(e){ audio.heal = null; }
+    try { audio.levelup = await loadAudio(ASSETS.levelup); } catch(e){ audio.levelup = null; }
+
+    // set volume controls
+    musicVol.value = Number(localStorage.getItem('rpg_music_vol') || musicVol.value);
+    sfxVol.value = Number(localStorage.getItem('rpg_sfx_vol') || sfxVol.value);
+    if (audio.bgm) audio.bgm.volume = Number(musicVol.value);
+    Object.keys(audio).forEach(k => { if (k!=='bgm' && audio[k]) audio[k].volume = Number(sfxVol.value); });
+
+    // finalize init
+    initAfterPreload();
+  })();
+}
+
+/* ---------- After preload initialization ---------- */
+function initAfterPreload(){
+  // restore saved player if present
+  const saved = localStorage.getItem('rpgSave_v1');
+  if (saved){ try { player = JSON.parse(saved); } catch(e){} }
+
+  // restore settings if persisted
+  if (localStorage.getItem('rpg_trail_persist') === '1'){
+    settings.color = localStorage.getItem('rpg_trail_color') || settings.color;
+    settings.glowIntensity = Number(localStorage.getItem('rpg_glow_intensity') || settings.glowIntensity);
+    settings.trailLen = Number(localStorage.getItem('rpg_trail_len') || settings.trailLen);
+    trailPicker.value = settings.color;
+    glowIntensityInput.value = settings.glowIntensity;
+    trailLenInput.value = settings.trailLen;
+    persistCheckbox.checked = true;
+    TRAIL_MAX = settings.trailLen;
+  }
+
+  // ensure audio slider values reflect localStorage
+  musicVol.value = Number(localStorage.getItem('rpg_music_vol') || musicVol.value);
+  sfxVol.value = Number(localStorage.getItem('rpg_sfx_vol') || sfxVol.value);
+  if (audio.bgm) audio.bgm.volume = Number(musicVol.value);
+  Object.keys(audio).forEach(k => { if (k!=='bgm' && audio[k]) audio[k].volume = Number(sfxVol.value); });
+
+  // play bgm on first user gesture (browsers block autoplay)
+  document.body.addEventListener('pointerdown', ()=> { try{ if (audio.bgm) audio.bgm.play().catch(()=>{}); }catch{} }, {once:true});
+
+  // start
+  requestAnimationFrame(loop);
+}
+
+/* ---------- Expose some debug helpers to console if needed ---------- */
+window._rpg = { player, enemies, heals, particles, settings };
+
+/* End of script */
+</script>
+</body>
+</html>
